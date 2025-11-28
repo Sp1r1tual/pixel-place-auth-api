@@ -7,6 +7,7 @@ import { createClient } from "@supabase/supabase-js";
 
 import { router } from "./router.js";
 import { errorMiddleware } from "./shared/middlewares/error-middleware.js";
+
 const SUPABASE_URL = process.env.SUPABASE_URL as string;
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY as string;
 
@@ -16,7 +17,7 @@ const PORT = process.env.PORT || 7000;
 const app = express();
 const server = http.createServer(app);
 
-const allowedOrigins = [process.env.CLIENT_URL, process.env.MAIL_SERVICE_URL];
+const allowedOrigins = [process.env.CLIENT_URL];
 
 app.use(
   cors({
