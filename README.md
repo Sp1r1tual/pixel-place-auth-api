@@ -29,7 +29,7 @@ It’s pixel democracy: **each user gets one pixel, but together, they build art
 - **Security:** bcrypt, cookie-parser, CORS, dotenv
 - **Tooling:** ESLint, Prettier, Husky, lint-staged
 
-📐 **Architecture**: Client ↔ MailService ↔ Server ↔ MailService ↔ Database
+📐 **Architecture**: Client ↔ AuthService ↔ Server ↔ MailService ↔ Database
 
 ---
 

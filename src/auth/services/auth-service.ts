@@ -2,22 +2,23 @@ import bcrypt from "bcrypt";
 import { v4 as uuidv4 } from "uuid";
 import jwt from "jsonwebtoken";
 
-import { IAuthPayload } from "../../types/auth.js";
+import { IAuthPayload, ITokens } from "../../types/auth.js";
 
-import { supabase } from "../../index.js";
-import { UserDto } from "../../shared/dto/userDto.js";
+import { AuthModel } from "../models/auth-model.js";
 
 import { EmailService } from "./email-service.js";
 
+import { UserDto } from "../../shared/dto/userDto.js";
 import { ApiError } from "../../shared/exceptions/api-error.js";
 import { AUTH_ERRORS } from "../utils/errors/errors-messages.js";
 
-interface ITokens {
-  accessToken: string;
-  refreshToken: string;
-}
-
 class AuthService {
+  private readonly authModel: AuthModel;
+
+  constructor() {
+    this.authModel = new AuthModel();
+  }
+
   private generateTokens(payload: object): ITokens {
     const accessSecret = process.env.JWT_ACCESS_SECRET;
     const refreshSecret = process.env.JWT_REFRESH_SECRET;
@@ -31,38 +32,18 @@ class AuthService {
   }
 
   private async saveToken(userId: string, refreshToken: string): Promise<void> {
-    const { data: existing, error: findError } = await supabase
-      .from("tokens")
-      .select("*")
-      .eq("user_id", userId)
-      .maybeSingle();
-
-    if (findError && findError.code !== "PGRST116") throw findError;
+    const existing = await this.authModel.findTokenByUserId(userId);
 
     if (existing) {
-      const { error: updateError } = await supabase
-        .from("tokens")
-        .update({ refresh_token: refreshToken })
-        .eq("user_id", userId);
-      if (updateError) throw updateError;
-      return;
+      await this.authModel.updateToken(userId, refreshToken);
+    } else {
+      await this.authModel.createToken(userId, refreshToken);
     }
-
-    const { error: insertError } = await supabase
-      .from("tokens")
-      .insert({ user_id: userId, refresh_token: refreshToken });
-    if (insertError) throw insertError;
   }
 
   private async deleteUser(userId: string): Promise<void> {
     try {
-      const { error } = await supabase.from("users").delete().eq("id", userId);
-
-      if (error) {
-        console.error("Error deleting user:", error);
-      } else {
-        console.log(`User ${userId} deleted successfully`);
-      }
+      await this.authModel.deleteUser(userId);
     } catch (error) {
       console.error("Exception while deleting user:", error);
     }
@@ -86,13 +67,9 @@ class AuthService {
   }
 
   public async login({ email, password }: IAuthPayload) {
-    const { data: user, error } = await supabase
-      .from("users")
-      .select("*")
-      .eq("email", email)
-      .single();
+    const user = await this.authModel.findUserByEmail(email);
 
-    if (error || !user) throw ApiError.NotFound(AUTH_ERRORS.userNotFound);
+    if (!user) throw ApiError.NotFound(AUTH_ERRORS.userNotFound);
 
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch)
@@ -108,28 +85,21 @@ class AuthService {
   }
 
   public async registration({ email, password }: IAuthPayload) {
-    const { data: existing } = await supabase
-      .from("users")
-      .select("email")
-      .eq("email", email)
-      .maybeSingle();
+    const existing = await this.authModel.findUserByEmail(email);
     if (existing) throw ApiError.BadRequest(AUTH_ERRORS.userAlreadyExists);
 
     const hashPassword = await bcrypt.hash(password, 10);
     const activationLink = uuidv4();
 
-    const { data: user, error } = await supabase
-      .from("users")
-      .insert({
+    let user;
+    try {
+      user = await this.authModel.createUser({
         email,
         password: hashPassword,
         activation_link: activationLink,
         is_activated: false,
-      })
-      .select("*")
-      .single();
-
-    if (error || !user) {
+      });
+    } catch {
       throw ApiError.BadRequest(AUTH_ERRORS.registrationFailed);
     }
 
@@ -160,28 +130,16 @@ class AuthService {
   }
 
   public async logout(refreshToken: string): Promise<void> {
-    const { error } = await supabase
-      .from("tokens")
-      .delete()
-      .eq("refresh_token", refreshToken);
-    if (error) throw error;
+    await this.authModel.deleteTokenByRefreshToken(refreshToken);
   }
 
   public async activate(activationLink: string): Promise<void> {
-    const { data: user, error } = await supabase
-      .from("users")
-      .select("*")
-      .eq("activation_link", activationLink)
-      .single();
-    if (error || !user)
-      throw ApiError.NotFound(AUTH_ERRORS.invalidActivationLink);
+    const user = await this.authModel.findUserByActivationLink(activationLink);
+
+    if (!user) throw ApiError.NotFound(AUTH_ERRORS.invalidActivationLink);
     if (user.is_activated) return;
 
-    const { error: updateError } = await supabase
-      .from("users")
-      .update({ is_activated: true })
-      .eq("id", user.id);
-    if (updateError) throw updateError;
+    await this.authModel.updateUser(user.id, { is_activated: true });
   }
 
   public async refresh(refreshToken: string) {
@@ -196,19 +154,12 @@ class AuthService {
       email: string;
     };
 
-    const { data: tokenRecord } = await supabase
-      .from("tokens")
-      .select("*")
-      .eq("refresh_token", refreshToken)
-      .single();
+    const tokenRecord =
+      await this.authModel.findTokenByRefreshToken(refreshToken);
     if (!tokenRecord)
       throw ApiError.UnauthorizedError(AUTH_ERRORS.invalidRefreshToken);
 
-    const { data: user } = await supabase
-      .from("users")
-      .select("*")
-      .eq("id", userData.id)
-      .single();
+    const user = await this.authModel.findUserById(userData.id);
     if (!user) throw ApiError.NotFound(AUTH_ERRORS.userNotFound);
 
     const userDto = new UserDto(user);
@@ -219,22 +170,14 @@ class AuthService {
   }
 
   public async forgotPassword(email: string): Promise<void> {
-    const { data: user, error } = await supabase
-      .from("users")
-      .select("id, email")
-      .eq("email", email)
-      .single();
-    if (error || !user) throw ApiError.NotFound(AUTH_ERRORS.userNotFound);
+    const user = await this.authModel.findUserByEmail(email);
+    if (!user) throw ApiError.NotFound(AUTH_ERRORS.userNotFound);
 
     const resetToken = uuidv4();
 
-    const { error: insertError } = await supabase.from("reset_tokens").insert({
-      user_id: user.id,
-      reset_token: resetToken,
-      created_at: new Date().toISOString(),
-    });
-
-    if (insertError) {
+    try {
+      await this.authModel.createResetToken(user.id, resetToken);
+    } catch {
       throw ApiError.BadRequest("Failed to create reset token");
     }
 
@@ -248,10 +191,7 @@ class AuthService {
     } catch (emailError) {
       console.error(`Failed to send reset password email... ${emailError}`);
 
-      await supabase
-        .from("reset_tokens")
-        .delete()
-        .eq("reset_token", resetToken);
+      await this.authModel.deleteResetToken(resetToken);
 
       throw ApiError.BadRequest(
         "Failed to send reset password email. Please try again later.",
@@ -263,28 +203,16 @@ class AuthService {
     resetToken: string,
     newPassword: string,
   ): Promise<void> {
-    const { data: tokenRecord } = await supabase
-      .from("reset_tokens")
-      .select("*")
-      .eq("reset_token", resetToken)
-      .maybeSingle();
+    const tokenRecord = await this.authModel.findResetToken(resetToken);
     if (!tokenRecord)
       throw ApiError.UnauthorizedError(AUTH_ERRORS.resetTokenUsed);
 
-    const { data: user } = await supabase
-      .from("users")
-      .select("*")
-      .eq("id", tokenRecord.user_id)
-      .single();
+    const user = await this.authModel.findUserById(tokenRecord.user_id);
     if (!user) throw ApiError.NotFound(AUTH_ERRORS.userNotFound);
 
     const hashedPassword = await bcrypt.hash(newPassword, 10);
-    await supabase
-      .from("users")
-      .update({ password: hashedPassword })
-      .eq("id", user.id);
-
-    await supabase.from("reset_tokens").delete().eq("reset_token", resetToken);
+    await this.authModel.updateUser(user.id, { password: hashedPassword });
+    await this.authModel.deleteResetToken(resetToken);
   }
 }
 
